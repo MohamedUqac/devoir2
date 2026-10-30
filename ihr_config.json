@@ -102,7 +102,7 @@
     "llm_keep_alive": -1,
     "speech_language": "fr-FR",
     "ambient_noise_seconds": 1.0,
-    "microphone_device_index": null,
+    "microphone_device_index": 1,
     "diagnostic_micro": {
       "duree_mesure_secondes": 3.0,
       "phrase_test_defaut": "avance",
@@ -236,8 +236,8 @@
     },
     "microphone_pause_apres_echec_s": 2.0,
     "speech_model_size": "small",
-    "speech_compute_type": "float16",
-    "speech_device": "cuda",
+    "speech_compute_type": "int8",
+    "speech_device": "cpu",
     "speech_rafraichissement_secondes": 3.0,
     "microphone_arret_fil_timeout_s": 2.0,
     "microphone_duree_max_ecoute_s": 600.0,
@@ -387,3 +387,6 @@
     "periode_publication_s": 0.05
   }
 }
+
+
+
