@@ -104,12 +104,17 @@ def executer_action(turtle, action, settings: dict[str, Any],
 
     publies = 0
     ecoule = 0.0
-    while ecoule < action.duree_s:
+    # La derniere tranche est RACCOURCIE au temps qui reste. Sans cela, chaque
+    # tranche dure `periode` meme quand il ne reste que 0,09 s : « tourne de 45
+    # degres » faisait tourner de 50,7 degres et 135 de 143 (mesure le 2026-11-10,
+    # test_tortue_ros.py). Le nombre de messages publies ne change pas.
+    while action.duree_s - ecoule > 1e-9:
         turtle.drive(linear=action.linear, angular=action.angular)
         turtle.spin_once(0.0)
         publies += 1
-        sleep(periode)
-        ecoule += periode
+        pas = min(periode, action.duree_s - ecoule)
+        sleep(pas)
+        ecoule += pas
 
     turtle.stop()
     turtle.spin_once(0.0)

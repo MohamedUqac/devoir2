@@ -67,6 +67,7 @@ confirmation pour les deux cas, plutot qu'un chemin special pour le cas simple.
 
 from __future__ import annotations
 
+import math
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
@@ -717,8 +718,10 @@ def action_depuis_config(nom: str, actions_cfg: dict[str, Any],
     is_clockwise_defaut = bool(entree.get("is_clockwise_defaut", False))
     is_forward = bool(p.get("is_forward", is_forward_defaut))
     is_clockwise = bool(p.get("is_clockwise", is_clockwise_defaut))
-    distance_m = float(p.get("distance_m", distance_defaut))
-    angle_deg = float(p.get("angle_deg", angle_defaut))
+    # Un 0 rendu par la LLM veut dire « non precise » (le prompt le lui demande) :
+    # la valeur par defaut de la configuration s'applique alors, texte compris.
+    distance_m = float(p.get("distance_m") or distance_defaut)
+    angle_deg = float(p.get("angle_deg") or angle_defaut)
 
     distance_max = float(bornes["distance_m_max"]) if bornes else None
     angle_max = float(bornes["angle_deg_max"]) if bornes else None
@@ -729,6 +732,16 @@ def action_depuis_config(nom: str, actions_cfg: dict[str, Any],
     angle_deg = _borner(angle_deg, angle_max)
     linear_speed = _borner(linear_speed_cfg, linear_max)
     angular_speed = _borner(angular_speed_cfg, angular_max)
+
+    # Correctif de l'equipe : la tortue n'avance que de linear x duree_s et ne
+    # tourne que de angular x duree_s. Quand l'appelant PRECISE une distance ou un
+    # angle, la duree s'en deduit ; sinon, la duree de la configuration s'applique.
+    # La distance n'est lue que pour une action lineaire, l'angle que pour une
+    # action rotative, et une valeur nulle retombe sur le defaut (jamais duree 0).
+    if p.get("distance_m") and distance_m > 0.0 and linear_speed > 0.0 and angular_speed == 0.0:
+        duree_s = distance_m / linear_speed
+    elif p.get("angle_deg") and angle_deg > 0.0 and angular_speed > 0.0 and linear_speed == 0.0:
+        duree_s = math.radians(angle_deg) / angular_speed
 
     linear, angular = signer(linear_speed, angular_speed, is_forward, is_clockwise)
 

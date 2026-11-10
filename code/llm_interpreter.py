@@ -84,6 +84,7 @@ une VRAM mesuree VIDE au demarrage (defaut 2,
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -224,6 +225,12 @@ def construire_prompt(commande: str, actions_cfg: dict[str, Any],
     conventions = (
         "Conventions obligatoires, a respecter strictement :\n"
         "- distance_m et angle_deg sont des grandeurs POSITIVES, jamais negatives.\n"
+        "- RECOPIE les nombres dits par l'utilisateur : « de 45 degres » donne "
+        "angle_deg = 45 ; « de 3 metres » donne distance_m = 3. N'invente jamais "
+        "un nombre.\n"
+        "- Si l'utilisateur ne donne AUCUN nombre pour une grandeur, mets 0 : la "
+        "valeur par defaut du robot sera appliquee ensuite.\n"
+        "- Pour tourner, distance_m vaut 0 ; pour avancer ou reculer, angle_deg vaut 0.\n"
         "- is_forward vaut vrai pour avancer, faux pour reculer.\n"
         "- is_clockwise vaut vrai pour tourner a DROITE (sens horaire), faux pour "
         "tourner a GAUCHE (sens antihoraire).\n"
@@ -255,6 +262,85 @@ def construire_prompt(commande: str, actions_cfg: dict[str, Any],
         "l'un des noms ci-dessus, sans rien ajouter. Le champ justification "
         "contient au plus une phrase courte en francais."
     )
+
+
+
+_MOTS_NOMBRES = {
+    "un": 1, "une": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5, "six": 6,
+    "sept": 7, "huit": 8, "neuf": 9, "dix": 10, "quinze": 15, "vingt": 20,
+    "trente": 30, "quarante": 40, "quarante-cinq": 45, "quarante cinq": 45,
+    "cinquante": 50, "soixante": 60, "quatre-vingt-dix": 90,
+    "quatre vingt dix": 90, "cent": 100, "cent quatre-vingts": 180,
+    "cent quatre vingts": 180,
+}
+_NOMBRE = (r"(\d+(?:[.,]\d+)?|cent quatre[- ]vingts|quatre[- ]vingt[- ]dix|"
+           r"quarante[- ]cinq|quinze|quarante|cinquante|soixante|trente|vingt|"
+           r"trois|quatre|cinq|sept|huit|neuf|deux|une|un|six|dix|cent)")
+_RE_GRANDEUR = re.compile(
+    _NOMBRE + r"\s*(degr[ée]s?|°|m[èe]tres?\b|m\b)", re.IGNORECASE)
+
+
+def _valeur_nombre(texte: str) -> float:
+    """Convertir « 45 », « 1,5 » ou « quarante-cinq » en nombre."""
+    t = texte.lower().replace("-", " ")
+    if t in _MOTS_NOMBRES:
+        return float(_MOTS_NOMBRES[t])
+    return float(t.replace(",", "."))
+
+
+def extraire_grandeurs(commande: str) -> tuple[list[float], list[float]]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Lire dans la phrase les distances (metres) et les angles (degres)
+        PRONONCES, dans leur ordre d'apparition. Filet de securite : un modele
+        de 4 milliards de parametres ignore parfois un nombre pourtant dit
+        (mesure le 2026-11-10 : « avance de 3 metres » rendu avec 2 metres).
+
+    Inputs:
+        commande (str): phrase de l'utilisateur
+
+    Outputs:
+        (distances, angles) (tuple[list[float], list[float]])
+    --------------------------------------------------------------------------
+    """
+    distances: list[float] = []
+    angles: list[float] = []
+    for m in _RE_GRANDEUR.finditer(commande or ""):
+        valeur = _valeur_nombre(m.group(1))
+        unite = m.group(2).lower()
+        (angles if unite.startswith(("d", "°")) else distances).append(valeur)
+    return distances, angles
+
+
+def _imposer_grandeurs(etapes: list[dict[str, Any]], commande: str) -> None:
+    """
+    Ecraser distance_m / angle_deg des etapes par les nombres dits, dans l'ordre :
+    la i-eme etape de mouvement lineaire prend la i-eme distance, la i-eme
+    rotation prend le i-eme angle. Sans nombre correspondant, la valeur du
+    modele est conservee.
+    """
+    distances, angles = extraire_grandeurs(commande)
+    txt = commande or ""
+    gauche = re.search(r"gauche|anti-?horaire", txt, re.IGNORECASE)
+    droite = re.search(r"droite|(?<!anti)(?<!anti-)horaire", txt, re.IGNORECASE)
+    for etape in etapes:
+        nom = str(etape.get("action", "")).strip()
+        if nom == "tourner":
+            if gauche and not droite:
+                etape["is_clockwise"] = False
+            elif droite and not gauche:
+                etape["is_clockwise"] = True
+            elif not gauche and not droite:
+                # Aucun sens prononce : le modele en invente un (mesure le
+                # 2026-11-10, « tourne de 45 degres » rendu « vers la droite »).
+                # On retire son choix : le defaut de la configuration s'applique.
+                etape.pop("is_clockwise", None)
+            # gauche ET droite dans la meme phrase : on garde le choix du modele.
+        if nom in ("avancer", "reculer") and distances:
+            etape["distance_m"] = distances.pop(0)
+        elif nom == "tourner" and angles:
+            etape["angle_deg"] = angles.pop(0)
 
 
 class LlmInterpreter:
@@ -374,7 +460,7 @@ class LlmInterpreter:
                 continue
 
             brut = self._extraire_texte(reponse)
-            plan, erreur = self._lire_plan(brut)
+            plan, erreur = self._lire_plan(brut, commande)
             if plan is None:
                 derniere_erreur = erreur
                 continue
@@ -443,7 +529,7 @@ class LlmInterpreter:
         return action_depuis_config(nom.strip(), self._actions, params=etape,
                                     bornes=self._bornes)
 
-    def _lire_plan(self, brut: str) -> tuple[Plan | None, str]:
+    def _lire_plan(self, brut: str, commande: str = "") -> tuple[Plan | None, str]:
         """
         --------------------------------------------------------------------------
         Purpose:
@@ -484,6 +570,7 @@ class LlmInterpreter:
             if len(etapes_brutes) > self._sequence_max:
                 return None, (f"sequence de {len(etapes_brutes)} etapes depasse la "
                               f"borne sequence_max_etapes={self._sequence_max}")
+            _imposer_grandeurs([e for e in etapes_brutes if isinstance(e, dict)], commande)
             actions: list[Action] = []
             for index, etape in enumerate(etapes_brutes):
                 if not isinstance(etape, dict):
@@ -500,6 +587,7 @@ class LlmInterpreter:
         if nom not in self._noms_permis:
             return None, (f"action '{nom}' hors de l'enumeration "
                           f"{self._noms_permis}")
+        _imposer_grandeurs([charge], commande)
         try:
             action = action_depuis_config(nom, self._actions, params=charge,
                                           bornes=self._bornes)
